@@ -3,3 +3,9 @@ input_path: "G:\\My Drive\\Clients\\Hucks2\\Driver Hours Update\\Input"
 # Comma-separated Employee Numbers to include in the run
 # You can also provide a YAML list instead of CSV.
 include_employee_numbers: "100610,100748,100806,101434,101441,104180,303213,318023,318031,318032,318038,318050,318065,318068,318070"
+
+# Earning codes to exclude from the summary
+exclude_earning_codes:
+  - STP-STOPS
+  - PIC-PIECES
+  - MIL-MILES
