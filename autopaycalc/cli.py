@@ -601,207 +601,6 @@ def write_adjustments_csv(
 
 
 # Removed old create_monthly_adjustments function - quarterly files now use same logic as main adjustment file
-    """Create separate adjustment import files grouped by quarter in which each pay run falls.
-
-    Groups by quarter of the pay date (derived from business date). Filenames: adjustments_Q{q}_{YYYY}.csv
-    """
-    if not pay_date_mapping:
-        return []
-    
-    # Group pay periods by pay date quarter
-    quarterly_groups = {}
-    ignore_cols = {"Employee Number", "Start Date", "End Date"}
-    # Also exclude any column that starts with "Expected Daily Hours"
-    pay_cols = [c for c in summary_df.columns 
-                if c not in ignore_cols and not c.startswith("Expected Daily Hours")]
-    
-    print(f"DEBUG: Total pay columns found: {len(pay_cols)}")
-    print(f"DEBUG: Pay date mapping has {len(pay_date_mapping)} entries")
-    
-    for col in pay_cols:
-        # Extract original column name (before business date was added)
-        original_col = col.split(" (")[0] if " (" in col else col
-        
-        if original_col in pay_date_mapping:
-            pay_date = pay_date_mapping[original_col]
-            if pd.notna(pay_date):
-                q = (int(pay_date.month) - 1) // 3 + 1
-                quarter_key = f"Q{q}_{int(pay_date.year)}"
-                print(f"DEBUG: Column '{col}' -> Pay Date {pay_date} -> Quarter {quarter_key}")
-                if quarter_key not in quarterly_groups:
-                    quarterly_groups[quarter_key] = []
-                quarterly_groups[quarter_key].append(col)
-            else:
-                print(f"DEBUG: Column '{col}' has NaN pay date")
-        else:
-            print(f"DEBUG: Column '{col}' (original: '{original_col}') not found in pay_date_mapping")
-    
-    print(f"DEBUG: Quarterly groups created: {list(quarterly_groups.keys())}")
-    for quarter_key, cols in quarterly_groups.items():
-        print(f"DEBUG: {quarter_key} has {len(cols)} columns: {cols[:3]}{'...' if len(cols) > 3 else ''}")
-    output_files = []
-    for quarter_key, quarter_cols in quarterly_groups.items():
-        # Subset dataframe to this quarter's columns
-        keep_cols = ["Employee Number", "Start Date", "End Date"] + quarter_cols
-        expected_cols = [c for c in summary_df.columns if c.startswith("Expected Daily Hours")]
-        keep_cols.extend(expected_cols)
-        quarter_df = summary_df[keep_cols].copy()
-        
-
-        # Prepare writer
-        output_dir.mkdir(parents=True, exist_ok=True)
-        quarter_path = output_dir / f"adjustments_{quarter_key}.csv"
-        if sample_format_path is None:
-            sample_format_path = Path("Adjustment Entries Template.csv")
-        h_len, d_len = _get_sample_record_lengths(sample_format_path)
-
-        check_counter = 1
-        with quarter_path.open("w", encoding="utf-8-sig", newline="") as f:
-            writer = csv.writer(f)
-            h_labels, d_labels = _read_header_rows(sample_format_path)
-            
-            # Define columns to exclude completely from CSV
-            excluded_columns = {"Import Set", "Month", "Year", "Quarter", "Saved By"}
-            
-            # Remove excluded columns and empty trailing columns from both header rows
-            filtered_h_labels = []
-            filtered_d_labels = []
-            
-            # Filter H row - remove columns where H label is in excluded list or empty
-            for h_label in h_labels:
-                if h_label.strip() and h_label not in excluded_columns:
-                    filtered_h_labels.append(h_label)
-            
-            # Filter D row - remove columns where D label is in excluded list or empty  
-            for d_label in d_labels:
-                if d_label.strip() and d_label not in excluded_columns:
-                    filtered_d_labels.append(d_label)
-            
-            writer.writerow(filtered_h_labels)
-            writer.writerow(filtered_d_labels)
-
-            # Build index maps for name-based placement using filtered labels
-            h_idx = {name: i for i, name in enumerate(filtered_h_labels)}
-            d_idx = {name: i for i, name in enumerate(filtered_d_labels)}
-
-            for _, row in quarter_df.iterrows():
-                emp_no = str(row.get("Employee Number", "")).strip()
-                if not emp_no:
-                    continue
-
-                start_dt = pd.to_datetime(row.get("Start Date"), errors="coerce") if "Start Date" in quarter_df.columns else pd.NaT
-                end_dt = pd.to_datetime(row.get("End Date"), errors="coerce") if "End Date" in quarter_df.columns else pd.NaT
-                expected_daily = (grant_autopay_hours / 5.0)
-
-                # Check if this employee has any adjustments for this quarter's columns
-                employee_has_adjustments = False
-                employee_adjustments = []
-
-                print(f"DEBUG: Processing employee {emp_no} for quarter {quarter_key} with {len(quarter_cols)} columns")
-
-                for col in quarter_cols:
-                    # Extract original column name to get pay date
-                    original_name = col.split(" (")[0] if " (" in col else col
-                    
-                    # Check if this column's pay date falls within this quarter
-                    if pay_date_mapping and original_name in pay_date_mapping:
-                        pay_date = pay_date_mapping[original_name]
-                        if pd.notna(pay_date):
-                            pay_quarter = (int(pay_date.month) - 1) // 3 + 1
-                            pay_quarter_key = f"Q{pay_quarter}_{int(pay_date.year)}"
-                            
-                            # Only process this column if its pay date matches this quarter
-                            if pay_quarter_key != quarter_key:
-                                print(f"DEBUG: Skipping column {col} - pay date {pay_date} is {pay_quarter_key}, not {quarter_key}")
-                                continue
-                        else:
-                            print(f"DEBUG: Skipping column {col} - no valid pay date")
-                            continue
-                    else:
-                        print(f"DEBUG: Skipping column {col} - not found in pay_date_mapping")
-                        continue
-
-                    bdate_str = _extract_business_date(col) or ""
-                    bdate = pd.to_datetime(bdate_str, errors="coerce") if bdate_str else pd.NaT
-                    if pd.isna(bdate):
-                        continue
-                    week_start, week_end = _pp_range_from_business_date(bdate, period_length_days)
-                    eff_start = week_start if pd.isna(start_dt) else max(week_start, start_dt.normalize())
-                    eff_end = week_end if pd.isna(end_dt) else min(week_end, end_dt.normalize())
-                    if str(proration).lower() == "calendar_days":
-                        overlap_days = (eff_end - eff_start).days + 1 if eff_end >= eff_start else 0
-                    else:
-                        overlap_days = _business_days_inclusive(eff_start, eff_end)
-                    if overlap_days <= 0:
-                        continue
-
-                    val = row.get(col, "")
-                    try:
-                        hours = float(val) if val != "" else 0.0
-                    except (TypeError, ValueError):
-                        hours = 0.0
-                    target_hours = expected_daily * overlap_days
-                    adj_hours = max(0.0, target_hours - hours)
-                    if adj_hours <= 0:
-                        print(f"DEBUG: Employee {emp_no}, Column {col}: No adjustment needed (adj_hours={adj_hours})")
-                        continue
-
-                    # Build Prior Run as PP_YYYY (zero-padded)
-                    pp_num = _infer_period_num_from_name(original_name) or 0
-                    
-                    # Use pay date year instead of period end date year
-                    pay_year = bdate.year  # Default fallback
-                    if pay_date_mapping and original_name in pay_date_mapping:
-                        pay_date = pay_date_mapping[original_name]
-                        if pd.notna(pay_date):
-                            pay_year = pay_date.year
-                    
-                    prior_run_val = f"{pp_num:02d}_{int(pay_year)}" if pp_num else ""
-
-                    print(f"DEBUG: Employee {emp_no}, Column {col}: Adding adjustment {adj_hours} hours (target={target_hours}, current={hours}) for {quarter_key}")
-
-                    # Store adjustment data for this employee
-                    employee_adjustments.append({
-                        'adj_hours': adj_hours,
-                        'code_name': code_name,
-                        'prior_run_val': prior_run_val
-                    })
-                    employee_has_adjustments = True
-
-                # Only write records for employees who have adjustments in this quarter
-                if employee_has_adjustments:
-                    # H record
-                    h = [""] * len(filtered_h_labels)
-                    h[0] = "H"
-                    if "Employee No." in h_idx:
-                        h[h_idx["Employee No."]] = emp_no
-                    writer.writerow(h)
-
-                    # Write all D records for this employee
-                    for adj in employee_adjustments:
-                        d = [""] * len(filtered_d_labels)
-                        d[0] = "D"
-                        if "Code" in d_idx:
-                            d[d_idx["Code"]] = adj['code_name']
-                        if "Hrs." in d_idx:
-                            d[d_idx["Hrs."]] = f"{adj['adj_hours']:g}"
-                        if "Amount" in d_idx:
-                            d[d_idx["Amount"]] = "0"
-                        if "Prior Run" in d_idx:
-                            d[d_idx["Prior Run"]] = adj['prior_run_val']
-                        writer.writerow(d)
-
-                    check_counter += 1
-
-        output_files.append(quarter_path)
-        print(f"DEBUG: Quarterly adjustment saved: {quarter_path}")
-        
-        # Count total adjustment hours in this quarterly file for verification
-        total_quarter_hours = sum(adj['adj_hours'] for emp_adjs in [employee_adjustments] for adj in emp_adjs if 'employee_adjustments' in locals())
-        print(f"DEBUG: {quarter_key} file contains approximately {total_quarter_hours:.2f} adjustment hours")
-
-    print(f"DEBUG: Created {len(output_files)} quarterly files total")
-    return output_files
 
 
 def create_monthly_outputs(
@@ -1375,26 +1174,28 @@ def main(argv: Optional[List[str]] = None) -> int:
             """Verify that the sum of hours in adjustment files matches the expected total."""
             total_from_files = 0.0
             
-            # Read main adjustment file
-            if adj_path.exists():
-                try:
-                    with adj_path.open("r", encoding="utf-8-sig") as f:
-                        reader = csv.reader(f)
-                        for row in reader:
-                            if row and row[0] == "D" and len(row) > 3:  # Detail row with hours
-                                try:
-                                    hours = float(row[3]) if row[3] else 0.0
-                                    total_from_files += hours
-                                except (ValueError, IndexError):
-                                    continue
-                except Exception as e:
-                    print(f"Warning: Could not verify main adjustment file: {e}", file=sys.stderr)
-            
-            # Read quarterly files
-            for qfile in quarterly_files:
-                if qfile.exists():
+            # If we have quarterly files, verify them instead of main file (they should contain same data split by quarter)
+            if quarterly_files:
+                # Read quarterly files only
+                for qfile in quarterly_files:
+                    if qfile.exists():
+                        try:
+                            with qfile.open("r", encoding="utf-8-sig") as f:
+                                reader = csv.reader(f)
+                                for row in reader:
+                                    if row and row[0] == "D" and len(row) > 3:  # Detail row with hours
+                                        try:
+                                            hours = float(row[3]) if row[3] else 0.0
+                                            total_from_files += hours
+                                        except (ValueError, IndexError):
+                                            continue
+                        except Exception as e:
+                            print(f"Warning: Could not verify quarterly file {qfile.name}: {e}", file=sys.stderr)
+            else:
+                # Read main adjustment file only if no quarterly files
+                if adj_path.exists():
                     try:
-                        with qfile.open("r", encoding="utf-8-sig") as f:
+                        with adj_path.open("r", encoding="utf-8-sig") as f:
                             reader = csv.reader(f)
                             for row in reader:
                                 if row and row[0] == "D" and len(row) > 3:  # Detail row with hours
@@ -1404,7 +1205,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                                     except (ValueError, IndexError):
                                         continue
                     except Exception as e:
-                        print(f"Warning: Could not verify quarterly file {qfile.name}: {e}", file=sys.stderr)
+                        print(f"Warning: Could not verify main adjustment file: {e}", file=sys.stderr)
             
             # Check if totals match (within small tolerance for floating point)
             tolerance = 0.01
