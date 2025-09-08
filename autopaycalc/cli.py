@@ -600,17 +600,7 @@ def write_adjustments_csv(
     return out_path, total_adjust_hours, per_employee
 
 
-def create_monthly_adjustments(
-    summary_df: pd.DataFrame,
-    output_dir: Path,
-    code_name: str = "Driver Hours",
-    sample_format_path: Optional[Path] = None,
-    period_length_days: int = 7,
-    proration: str = "business_days",
-    default_daily_hours: float = 8.0,
-    grant_autopay_hours: float = 40.0,
-    pay_date_mapping: dict = None,
-) -> List[Path]:
+# Removed old create_monthly_adjustments function - quarterly files now use same logic as main adjustment file
     """Create separate adjustment import files grouped by quarter in which each pay run falls.
 
     Groups by quarter of the pay date (derived from business date). Filenames: adjustments_Q{q}_{YYYY}.csv
