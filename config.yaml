@@ -1,11 +1,77 @@
+# ============================================================================
+# INPUT/OUTPUT CONFIGURATION
+# ============================================================================
+
+# Directory containing the input Excel files
 input_path: "G:\\My Drive\\Clients\\Hucks2\\Driver Hours Update\\Input"
+
+# Only process hours/earnings files matching this mask (exclude emplist)
+# Example: "Earnings and Hours by Pay*.xlsx"
+input_mask: "Earnings*.xlsx"
+
+# Employee list file name (if not set, auto-detects .xlsx file with EmployeeNumber and EffectiveStart/End)
+# Example: "emplist.xlsx"
+employee_input_name: "EmpList.xlsx"
+
+# Output directory and main results file name
+output_path: "G:\\My Drive\\Clients\\Hucks2\\Driver Hours Update"
+output_name: "AutoPay Adjustments Summary.xlsx"
+
+# ============================================================================
+# PAY PERIOD CONFIGURATION
+# ============================================================================
+
+# End date for Pay Period 1 (the period end date used for pp1)
+# Example: "2024-12-31"
+pay_period1_end_date: "12/31/2024"
+
+# Pay date for Pay Period 1 (when employees get paid for pp1)
+# Example: "2025-01-08"
+pay_period1_pay_date: "1/8/2025"
+
+# Number of days in each pay period (usually 7)
+pay_period_length_days: 7
+
+# ============================================================================
+# AUTOPAY HOURS CONFIGURATION
+# ============================================================================
+
+# Grant autopay hours per week (total amount to grant, not overridden by employee data)
+# This is the actual weekly hours to grant minus any existing work hours
+grant_autopay_hours: 40
+
+# Expected daily hours (will warn if employee has a different value from their record)
+expected_daily_hours: 8
+
+# How to prorate adjustments for partial weeks:
+#  - business_days (Mon-Fri)
+#  - calendar_days (all days)
+proration_mode: business_days
+
+# ============================================================================
+# EMPLOYEE FILTERING
+# ============================================================================
 
 # Comma-separated Employee Numbers to include in the run
 # You can also provide a YAML list instead of CSV.
 include_employee_numbers: "100610,100748,100806,101434,101441,104180,303213,318023,318031,318032,318038,318050,318065,318068,318070"
+
+# ============================================================================
+# DATA PROCESSING OPTIONS
+# ============================================================================
 
 # Earning codes to exclude from the summary
 exclude_earning_codes:
   - STP-STOPS
   - PIC-PIECES
   - MIL-MILES
+  - DWN-DOWN TIME
+  - PTS-PAYSTOSTAY
+  - GAL-GALLONS
+
+# ============================================================================
+# OUTPUT OPTIONS
+# ============================================================================
+
+# Generate monthly adjustment import files by pay date month ending (true/false)
+generate_monthly_adjustments: true

@@ -1,0 +1,5 @@
+﻿H,Employee Name,Employee No.,Third Party Sick Pay Provider,Tax Treatment,Comment,Residence State,Override Resident PSD Code,Distribution Code,Import Set,Saved By,,,,,,,,,,,,,,,,,
+D,EI Reference Code,Code,Hrs.,Amount,Job Assignment,Work Location,Legal Entity,Labor %,Wage Type,Comment,Limited Taxable Wage,Total Taxable Wage,Workers Comp Account,Workers Comp Code,Prior Run,Saved By,Saved At,Saved At UTC,Send To Payment Solutions,Do Not Disburse to Payee,Apply ROE Mapping,Labor Metrics,Year,Quarter,Override DTS Code,Hours Worked,Other Special Wages
+H,"Barrett, William",318009,,,,,,,,day.dan.crosby,,,,,,,,,,,,,,,,,
+D,,Driver Hours,8,0,Drivers - M&B Logistics Tanker Driver (Fuel Drivers),Fuel Drivers - 927,"M & B Logistic of Illinois, LLC",No,,,,,,,01_2024,day.dan.crosby,9/6/2025,9/6/2025,,No,No,,Adjustment,Adjustment,,,
+D,,Driver Hours,8,0,Drivers - M&B Logistics Tanker Driver (Fuel Drivers),Fuel Drivers - 927,"M & B Logistic of Illinois, LLC",No,,,,,,,02_2024,day.dan.crosby,9/6/2025,9/6/2025,,No,No,,Adjustment,Adjustment,,,
