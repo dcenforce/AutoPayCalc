@@ -945,16 +945,28 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"Error reading pay run info: {e}", file=sys.stderr)
             return 1
 
-        # Drop pay runs not present in the pay-run info (outside range)
-        valid_runs = set(pay_info["Pay Run Id"].astype(str))
-        before_runs = df["Pay Run Id"].astype(str).nunique()
-        df = df[df["Pay Run Id"].astype(str).isin(valid_runs)]
-        skipped_runs = before_runs - df["Pay Run Id"].astype(str).nunique()
+        # Extract pay periods from earnings data Pay Run Names for comparison
+        # Pay Run Names like "3EK - 28-00" should match periods 28-36
+        df_periods = df["Pay Run Name"].astype(str).str.extract(r"(\d+)(?:-\d+)?")[0]
+        valid_periods = set(pay_info["Pay Run Pay Period"].astype(str))
+        
+        # Filter earnings data to only include pay runs with periods in the valid range
+        valid_mask = df_periods.isin(valid_periods)
+        all_runs_in_data = set(df["Pay Run Name"].astype(str).unique())
+        valid_runs_in_data = set(df[valid_mask]["Pay Run Name"].astype(str).unique())
+        skipped_run_names = all_runs_in_data - valid_runs_in_data
+        
+        before_runs = len(all_runs_in_data)
+        df = df[valid_mask]
+        skipped_runs = before_runs - len(valid_runs_in_data)
+        
         if skipped_runs:
             print(
-                f"Warning: {skipped_runs} pay run(s) outside configured range skipped",
+                f"Warning: {skipped_runs} pay run(s) outside configured range skipped:",
                 file=sys.stderr,
             )
+            for run_name in sorted(skipped_run_names):
+                print(f"  - {run_name}", file=sys.stderr)
 
         raw_ded_codes = cfg.get("deduction_codes", [])
         if isinstance(raw_ded_codes, str):
@@ -975,6 +987,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             match_code=match_code,
         )
 
+        # Rename Pay Run Name to Pay Run Id for merge compatibility
+        summary = summary.rename(columns={"Pay Run Name": "Pay Run Id"})
         summary = summary.merge(
             pay_info[["Pay Run Id", "Period End", "Pay Run Pay Date"]],
             on="Pay Run Id",

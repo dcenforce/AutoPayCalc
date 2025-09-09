@@ -6,7 +6,7 @@
 mode: 401k
 
 # Directory containing the input Excel files
-input_path: "G:\\My Drive\\Clients\\Hucks2\\401K Match Cleanup2"
+input_path: "G:\\My Drive\\Clients\\Hucks2\\401K Match Cleanup2\\Input"
 
 # Only process 401K reports matching this mask
 input_mask: "Earnings and Deductions by Pay*.xlsx"
@@ -23,7 +23,7 @@ output_mode: quick_entries
 # ============================================================================
 
 # Pay Run Info file name (required)
-pay_run_info_name: "Pay Run Info_9-9-2025-114153-AM.xlsx"
+pay_run_info_name: "Pay Run Info_9-9-2025-24427-PM.xlsx"
 
 # Year and pay period range to process
 pay_period_year: 2025

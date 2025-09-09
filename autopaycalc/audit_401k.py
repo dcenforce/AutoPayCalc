@@ -76,15 +76,23 @@ def read_pay_run_info(
     df = pd.read_excel(files[0], engine="openpyxl")
     df.columns = [str(c).strip() for c in df.columns]
 
-    required = {
-        "Pay Run Id",
-        "Pay Run Pay Period",
-        "Pay Group Name",
-        "Pay Run Pay Date",
-        "Period End",
+    # Map actual column names to expected names
+    column_mapping = {
+        "Pay Run Id": "Pay Run Id",
+        "Pay Run Pay Period": "Pay Run Pay Period", 
+        "Pay Group Name": "Pay Group Name",
+        "Pay Run Pay Date": "Pay Run Pay Date",
+        "Period End": "Period End"
     }
-    missing = required.difference(df.columns)
+    
+    # Check if we have all required columns (allowing for exact matches)
+    required = set(column_mapping.keys())
+    available = set(df.columns)
+    missing = required.difference(available)
+    
     if missing:
+        # Print available columns for debugging
+        print(f"Available columns: {sorted(available)}", file=sys.stderr)
         raise KeyError(
             f"Missing required column(s) in pay run info file: {', '.join(sorted(missing))}"
         )
@@ -108,16 +116,17 @@ def read_pay_run_info(
     # Filter for desired pay group
     df = df[df["Pay Group Name"].astype(str).str.startswith(pay_group)]
 
-    # Normalize numeric/date fields
+    # Normalize period fields - keep as strings
     df["Pay Run Pay Period"] = (
-        df["Pay Run Pay Period"].astype(str).str.extract(r"(\d+)$")[0].astype(float)
+        df["Pay Run Pay Period"].astype(str).str.extract(r"(\d+)(?:-\d+)?$")[0]
     )
     df["Pay Run Pay Date"] = pd.to_datetime(df["Pay Run Pay Date"], errors="coerce")
     df["Period End"] = pd.to_datetime(df["Period End"], errors="coerce")
 
-    # Restrict to configured ranges
+    # Restrict to configured ranges - convert to int for comparison
+    period_ints = pd.to_numeric(df["Pay Run Pay Period"], errors="coerce")
     in_range = df[
-        df["Pay Run Pay Period"].between(start, end)
+        period_ints.between(start, end)
         & (df["Pay Run Pay Date"].dt.year == year)
     ]
     skipped = len(df) - len(in_range)
