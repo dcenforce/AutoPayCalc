@@ -2,6 +2,9 @@
 # INPUT/OUTPUT CONFIGURATION
 # ============================================================================
 
+# Run application in autopay mode
+mode: autopay
+
 # Directory containing the input Excel files
 input_path: "G:\\My Drive\\Clients\\Hucks2\\Driver Hours Update\\Input"
 
@@ -17,20 +20,23 @@ employee_input_name: "EmpList.xlsx"
 output_path: "G:\\My Drive\\Clients\\Hucks2\\Driver Hours Update"
 output_name: "AutoPay Adjustments Summary.xlsx"
 
+# Output mode for autopay processing
+output_mode: adjustments
+
 # ============================================================================
 # PAY PERIOD CONFIGURATION
 # ============================================================================
 
-# End date for Pay Period 1 (the period end date used for pp1)
-# Example: "2024-12-31"
-pay_period1_end_date: "12/31/2024"
+# Pay Run Info file name (required)
+pay_run_info_name: "Pay Run Info_9-9-2025-114706-AM.xlsx"
 
-# Pay date for Pay Period 1 (when employees get paid for pp1)
-# Example: "2025-01-08"
-pay_period1_pay_date: "1/8/2025"
+# Year and pay period range to process
+pay_period_year: 2025
+pay_period_start: 28
+pay_period_end: 36
 
-# Number of days in each pay period (usually 7)
-pay_period_length_days: 7
+# Pay group prefix for filtering pay runs
+pay_group: "3EK"
 
 # ============================================================================
 # AUTOPAY HOURS CONFIGURATION

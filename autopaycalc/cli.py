@@ -11,6 +11,12 @@ from collections.abc import Iterable
 import pandas as pd
 import yaml
 
+from .audit_401k import (
+    read_earnings_deductions,
+    calculate_401k_matches,
+    read_pay_run_info,
+)
+
 import warnings
 
 # Suppress openpyxl style warnings
@@ -154,6 +160,7 @@ def _parse_include_numbers(raw: Optional[Iterable]) -> Set[str]:
     """Parse include list from config; supports CSV string or YAML list."""
     if raw is None:
         return set()
+
     if isinstance(raw, str):
         items = [x.strip() for x in raw.split(",") if x.strip()]
         return set(items)
@@ -900,34 +907,132 @@ def main(argv: Optional[List[str]] = None) -> int:
     
     include_numbers = _parse_include_numbers(cfg.get("include_employee_numbers"))
     exclude_codes = set(cfg.get("exclude_earning_codes", []))
+    mode = str(cfg.get("mode", "autopay")).lower()
+    output_mode = str(cfg.get("output_mode", "adjustments")).lower()
+
+    pay_run_info_name = str(cfg.get("pay_run_info_name", "")).strip()
+    if not pay_run_info_name:
+        print("Error: pay_run_info_name not specified in config", file=sys.stderr)
+        return 2
+    pay_period_year = int(cfg.get("pay_period_year", 2025))
+    pay_period_start = int(cfg.get("pay_period_start", 28))
+    pay_period_end = int(cfg.get("pay_period_end", 36))
+    pay_group = str(cfg.get("pay_group", "3EK")).strip()
 
     if not input_path:
         print("Error: input path not provided (via --input or config.yaml input_path)", file=sys.stderr)
         return 2
 
+    if mode == "401k":
+        input_mask = cfg.get("input_mask", "Earnings and Deductions by Pay*.xlsx")
+        try:
+            df = read_earnings_deductions(input_path, input_mask, pay_group=pay_group)
+        except Exception as e:
+            print(f"Error reading 401K data: {e}", file=sys.stderr)
+            return 1
+
+        df = split_employee_column(df)
+        try:
+            pay_info = read_pay_run_info(
+                input_path,
+                pay_run_info_name,
+                pay_group=pay_group,
+                year=pay_period_year,
+                start=pay_period_start,
+                end=pay_period_end,
+            )
+        except Exception as e:
+            print(f"Error reading pay run info: {e}", file=sys.stderr)
+            return 1
+
+        # Drop pay runs not present in the pay-run info (outside range)
+        valid_runs = set(pay_info["Pay Run Id"].astype(str))
+        before_runs = df["Pay Run Id"].astype(str).nunique()
+        df = df[df["Pay Run Id"].astype(str).isin(valid_runs)]
+        skipped_runs = before_runs - df["Pay Run Id"].astype(str).nunique()
+        if skipped_runs:
+            print(
+                f"Warning: {skipped_runs} pay run(s) outside configured range skipped",
+                file=sys.stderr,
+            )
+
+        raw_ded_codes = cfg.get("deduction_codes", [])
+        if isinstance(raw_ded_codes, str):
+            deduction_codes = [c.strip() for c in raw_ded_codes.split(",") if c.strip()]
+        else:
+            deduction_codes = [str(c).strip() for c in (raw_ded_codes or [])]
+
+        match_percent = float(cfg.get("match_percent", 25.0))
+        match_minimum = float(cfg.get("match_minimum", 10.0))
+        match_max_percent = float(cfg.get("match_max_percent", 6.0))
+        match_code = str(cfg.get("match_code", "401-K Match"))
+        summary = calculate_401k_matches(
+            df,
+            deduction_codes,
+            match_percent=match_percent,
+            match_minimum=match_minimum,
+            match_max_percent=match_max_percent,
+            match_code=match_code,
+        )
+
+        summary = summary.merge(
+            pay_info[["Pay Run Id", "Period End", "Pay Run Pay Date"]],
+            on="Pay Run Id",
+            how="left",
+        )
+
+        # Flag cases where an existing match will be adjusted
+        warning_mask = (summary["Actual Match"] != 0) & (
+            summary["Match Difference"] > 0
+        )
+        summary["Warning"] = ""
+        summary.loc[warning_mask, "Warning"] = summary.loc[warning_mask, "Actual Match"].map(
+            lambda amt: f"Existing match {amt} will be adjusted"
+        )
+
+        # Output summary and optional quick-entry adjustments
+        if output_path is None:
+            summary_path = Path("401k_summary.csv")
+        else:
+            summary_path = output_path
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        if summary_path.suffix.lower() in {".xlsx", ".xls"}:
+            summary.to_excel(summary_path, index=False)
+        else:
+            summary.to_csv(summary_path, index=False)
+
+        messages = [f"Summary saved to: {summary_path}"]
+        if output_mode == "quick_entries":
+            quick = summary[summary["Match Difference"] > 0].copy()
+            quick["EmployeeNumber"] = quick["Employee Number"]
+            quick["Code"] = match_code
+            quick["Hours"] = 0
+            quick["Rate"] = 0
+            quick["Amount"] = quick["Match Difference"]
+            quick["BusinessDate"] = pd.to_datetime(
+                quick["Period End"], errors="coerce"
+            ).dt.strftime("%Y-%m-%d")
+            quick = quick[
+                ["EmployeeNumber", "Code", "Hours", "Rate", "Amount", "BusinessDate"]
+            ]
+            adj_path = summary_path.with_name(summary_path.stem + "_adjustments.csv")
+            quick.to_csv(adj_path, index=False)
+            messages.append(f"Adjustments saved to: {adj_path}")
+
+        for msg in messages:
+            print(f"\n{msg}")
+        return 0
+
     try:
         # Get input mask from config
         input_mask = cfg.get("input_mask", "*.xlsx")
         employee_input_name = str(cfg.get("employee_input_name", "")).strip()
-        # Pay period configuration
-        pp1_end_raw = cfg.get("pay_period1_end_date")
-        pp1_pay_raw = cfg.get("pay_period1_pay_date")
-        base_end_date = None
-        base_pay_date = None
-        if pp1_end_raw:
-            try:
-                base_end_date = pd.to_datetime(pp1_end_raw).to_pydatetime()
-            except Exception:
-                base_end_date = None
-        if pp1_pay_raw:
-            try:
-                base_pay_date = pd.to_datetime(pp1_pay_raw).to_pydatetime()
-            except Exception:
-                base_pay_date = None
-        period_length_days = int(cfg.get("pay_period_length_days", 7))
         proration_mode = str(cfg.get("proration_mode", "business_days")).lower()
         default_daily_hours = float(cfg.get("expected_daily_hours", 8.0))
         grant_autopay_hours = float(cfg.get("grant_autopay_hours", 40.0))
+        base_end_date = None
+        base_pay_date = None
+        period_length_days = 7
         if not employee_input_name:
             autodetected = detect_employee_file(input_path)
             if autodetected:
@@ -951,7 +1056,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"Found {len(files)} Excel file(s) to process...")
         df = read_excels(files)
         df = split_employee_column(df)
-        
+
         # Read employee list if specified
         employee_df = None
         if employee_input_name:

@@ -1,0 +1,57 @@
+# ============================================================================
+# 401K MODE CONFIGURATION
+# ============================================================================
+
+# Run application in 401K mode
+mode: 401k
+
+# Directory containing the input Excel files
+input_path: "G:\\My Drive\\Clients\\Hucks2\\401K Match Cleanup2"
+
+# Only process 401K reports matching this mask
+input_mask: "Earnings and Deductions by Pay*.xlsx"
+
+# Output directory and main results file name
+output_path: "G:\\My Drive\\Clients\\Hucks2\\401K Match Cleanup2"
+output_name: "401K Match Summary.xlsx"
+
+# Output mode for 401K processing
+output_mode: quick_entries
+
+# ============================================================================
+# PAY PERIOD CONFIGURATION
+# ============================================================================
+
+# Pay Run Info file name (required)
+pay_run_info_name: "Pay Run Info_9-9-2025-114153-AM.xlsx"
+
+# Year and pay period range to process
+pay_period_year: 2025
+pay_period_start: 28
+pay_period_end: 36
+
+# Pay group prefix for filtering pay runs
+pay_group: "3EK"
+
+# ============================================================================
+# 401K MATCH PARAMETERS
+# ============================================================================
+
+# Match percent applied to employee deductions
+match_percent: 25
+
+# Minimum deduction amount required before match is applied
+match_minimum: 10
+
+# Maximum match as a percent of normal earnings
+match_max_percent: 6
+
+# Deduction codes treated as 401K contributions
+deduction_codes:
+  - "K-401K$"
+  - "401-401K"
+  - "R-ROTH$"
+  - "RTH-ROTH"
+
+# Earning code used for employer match
+match_code: "401-K ER MATCH"

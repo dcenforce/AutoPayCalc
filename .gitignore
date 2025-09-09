@@ -8,3 +8,8 @@ __pycache__/
 .env
 /.idea/
 /.vscode/
+*.xlsx
+
+# Test artifacts
+sample_data/
+n
