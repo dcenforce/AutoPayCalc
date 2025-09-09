@@ -945,24 +945,46 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"Error reading pay run info: {e}", file=sys.stderr)
             return 1
 
+        
         # Extract pay periods from earnings data Pay Run Names for comparison
-        # Pay Run Names like "3EK - 28-00" should match periods 28-36
-        df_periods = df["Pay Run Name"].astype(str).str.extract(r"(\d+)(?:-\d+)?")[0]
+        # Pay Run Names like "3EK - 28-00" should extract "28"
+        df_periods = df["Pay Run Name"].astype(str).str.extract(r"3EK - (\d+)(?:-\d+)?")[0]
+        earnings_periods = set(df_periods.dropna().unique())
         valid_periods = set(pay_info["Pay Run Pay Period"].astype(str))
         
-        # Filter earnings data to only include pay runs with periods in the valid range
-        valid_mask = df_periods.isin(valid_periods)
+        # Identify which pay runs from earnings data don't have Pay Run Info entries
         all_runs_in_data = set(df["Pay Run Name"].astype(str).unique())
+        valid_mask = df_periods.isin(valid_periods)
         valid_runs_in_data = set(df[valid_mask]["Pay Run Name"].astype(str).unique())
         skipped_run_names = all_runs_in_data - valid_runs_in_data
         
-        before_runs = len(all_runs_in_data)
+        # Apply filter to earnings data
         df = df[valid_mask]
-        skipped_runs = before_runs - len(valid_runs_in_data)
         
-        if skipped_runs:
+        # Map actual earnings columns to expected 401K processing columns
+        # Create separate rows for earnings and deductions
+        earnings_df = df[df["Current Earnings"].notna()].copy()
+        earnings_df["Record Type"] = "Earning"
+        earnings_df["Current Amount"] = earnings_df["Current Earnings"]
+        
+        deductions_df = df[df["Current Deductions"].notna()].copy() 
+        deductions_df["Record Type"] = "Deduction"
+        deductions_df["Current Amount"] = deductions_df["Current Deductions"]
+        
+        # Combine earnings and deductions into single DataFrame
+        df = pd.concat([earnings_df, deductions_df], ignore_index=True)
+        
+        # Add Pay Run Id column (using Pay Run Name as the identifier, ensure it's string without decimals)
+        df["Pay Run Id"] = df["Pay Run Name"].astype(str).str.replace('.0', '', regex=False)
+        
+        # Extract Employee Number from Employee column (trim and split on "-")
+        df["Employee Number"] = df["Employee"].astype(str).str.split("-").str[0].str.strip()
+        
+        
+        # Report skipped earnings data (not Pay Run Info entries)
+        if skipped_run_names:
             print(
-                f"Warning: {skipped_runs} pay run(s) outside configured range skipped:",
+                f"Warning: {len(skipped_run_names)} earnings pay run(s) skipped (no matching Pay Run Info):",
                 file=sys.stderr,
             )
             for run_name in sorted(skipped_run_names):
@@ -989,6 +1011,11 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         # Rename Pay Run Name to Pay Run Id for merge compatibility
         summary = summary.rename(columns={"Pay Run Name": "Pay Run Id"})
+        
+        # Ensure Pay Run Id columns have matching data types (both as strings)
+        summary["Pay Run Id"] = summary["Pay Run Id"].astype(str)
+        pay_info["Pay Run Id"] = pay_info["Pay Run Id"].astype(str)
+        
         summary = summary.merge(
             pay_info[["Pay Run Id", "Period End", "Pay Run Pay Date"]],
             on="Pay Run Id",

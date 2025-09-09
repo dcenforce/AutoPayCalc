@@ -76,65 +76,47 @@ def read_pay_run_info(
     df = pd.read_excel(files[0], engine="openpyxl")
     df.columns = [str(c).strip() for c in df.columns]
 
-    # Map actual column names to expected names
-    column_mapping = {
-        "Pay Run Id": "Pay Run Id",
-        "Pay Run Pay Period": "Pay Run Pay Period", 
-        "Pay Group Name": "Pay Group Name",
-        "Pay Run Pay Date": "Pay Run Pay Date",
-        "Period End": "Period End"
+    required = {
+        "Pay Run Id",
+        "Pay Run Pay Period",
+        "Pay Group Name",
+        "Pay Run Pay Date",
+        "Period End",
     }
-    
-    # Check if we have all required columns (allowing for exact matches)
-    required = set(column_mapping.keys())
-    available = set(df.columns)
-    missing = required.difference(available)
-    
+    missing = required.difference(df.columns)
     if missing:
-        # Print available columns for debugging
-        print(f"Available columns: {sorted(available)}", file=sys.stderr)
         raise KeyError(
             f"Missing required column(s) in pay run info file: {', '.join(sorted(missing))}"
         )
 
-    # Deduplicate pay group / period combos
-    seen: Dict[Tuple[str, str], bool] = {}
-    keep_rows = []
-    for _, row in df.iterrows():
-        key = (str(row["Pay Group Name"]), str(row["Pay Run Pay Period"]))
-        if key in seen:
-            print(
-                f"Warning: duplicate pay group '{key[0]}' and pay period '{key[1]}' skipped",
-                file=sys.stderr,
-            )
-            continue
-        seen[key] = True
-        keep_rows.append(row)
-
-    df = pd.DataFrame(keep_rows)
-
-    # Filter for desired pay group
+    # Filter for desired pay group first
     df = df[df["Pay Group Name"].astype(str).str.startswith(pay_group)]
 
-    # Normalize period fields - keep as strings
+    # Normalize period fields first - keep as strings
     df["Pay Run Pay Period"] = (
         df["Pay Run Pay Period"].astype(str).str.extract(r"(\d+)(?:-\d+)?$")[0]
     )
     df["Pay Run Pay Date"] = pd.to_datetime(df["Pay Run Pay Date"], errors="coerce")
     df["Period End"] = pd.to_datetime(df["Period End"], errors="coerce")
-
-    # Restrict to configured ranges - convert to int for comparison
-    period_ints = pd.to_numeric(df["Pay Run Pay Period"], errors="coerce")
-    in_range = df[
-        period_ints.between(start, end)
-        & (df["Pay Run Pay Date"].dt.year == year)
-    ]
-    skipped = len(df) - len(in_range)
-    if skipped:
-        print(
-            f"Warning: {skipped} pay run(s) outside configured range skipped",
-            file=sys.stderr,
-        )
+    
+    # Deduplicate within the filtered pay group only (after normalization)
+    # Keep the entry with the most recent pay date for each period
+    original_count = len(df)
+    df = df.sort_values("Pay Run Pay Date", ascending=False)
+    df = df.drop_duplicates(subset=["Pay Group Name", "Pay Run Pay Period"], keep="first")
+    
+    # Report any duplicates that were found and removed
+    if original_count > len(df):
+        duplicates_removed = original_count - len(df)
+        print(f"Warning: {duplicates_removed} duplicate entries removed for pay group '{pay_group}'", file=sys.stderr)
+    
+    # Filter by pay date year first
+    year_mask = df["Pay Run Pay Date"].dt.year == year
+    year_filtered = df[year_mask]
+    
+    # Then restrict to configured pay period ranges
+    period_ints = pd.to_numeric(year_filtered["Pay Run Pay Period"], errors="coerce")
+    in_range = year_filtered[period_ints.between(start, end)]
 
     return in_range.reset_index(drop=True)
 
@@ -218,6 +200,12 @@ def calculate_401k_matches(
             )
             expected_match = capped_deductions * (match_percent / 100.0)
 
+        match_difference = round(expected_match - actual_match, 2)
+        
+        # Exclude variances of ±0.01 (treat as zero difference)
+        if abs(match_difference) == 0.01:
+            match_difference = 0.0
+        
         results.append(
             {
                 "Employee Number": emp_no,
@@ -225,7 +213,7 @@ def calculate_401k_matches(
                 "401K Deductions": round(deduction_total, 2),
                 "Expected Match": round(expected_match, 2),
                 "Actual Match": round(actual_match, 2),
-                "Match Difference": round(expected_match - actual_match, 2),
+                "Match Difference": match_difference,
             }
         )
 
