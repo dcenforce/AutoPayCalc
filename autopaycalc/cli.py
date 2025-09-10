@@ -34,6 +34,13 @@ def check_file_locks(file_paths: List[Path]) -> List[Path]:
                     pass
             except (PermissionError, OSError):
                 locked_files.append(file_path)
+        else:
+            # For non-existent files, just ensure parent directory exists
+            # Don't test write permissions as it can give false positives
+            try:
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+            except (PermissionError, OSError):
+                locked_files.append(file_path.parent)
     return locked_files
 
 
@@ -964,9 +971,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if mode == "401k":
         # Check output file locks before reading any input files
-        output_path = Path(cfg.get("output_path", f"401K Match Summary_{pay_group}_{pay_period_year}.xlsx"))
-        if not output_path.is_absolute():
-            output_path = input_path / output_path
+        output_dir = Path(cfg.get("output_path", input_path))
+        output_name = cfg.get("output_name", f"401K Match Summary_{pay_group}_{pay_period_year}.xlsx")
+        output_path = output_dir / output_name
         
         potential_output_files = [output_path]
         if output_mode == "quick_entries":
@@ -977,7 +984,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         if locked_files:
             print("ERROR: The following output files are locked (possibly open in Excel):", file=sys.stderr)
             for locked_file in locked_files:
-                print(f"  - {locked_file}", file=sys.stderr)
+                if locked_file.is_file():
+                    print(f"  - {locked_file.name} (in {locked_file.parent})", file=sys.stderr)
+                else:
+                    print(f"  - Directory not writable: {locked_file}", file=sys.stderr)
             print("Please close these files and try again.", file=sys.stderr)
             return 1
 
@@ -1011,20 +1021,44 @@ def main(argv: Optional[List[str]] = None) -> int:
         earnings_periods = set(df_periods_normalized.dropna().unique())
         valid_periods = set(pay_info["Pay Run Pay Period"].astype(str))
         
+        # Check for bonus files (-01) vs regular files (-00)
+        bonus_runs = [run for run in all_runs_in_data if "-01" in run]
+        regular_runs = [run for run in all_runs_in_data if "-00" in run]
+        
+        if bonus_runs and not regular_runs:
+            print("WARNING: Only bonus pay runs (-01) detected. You may have downloaded bonus files instead of regular pay runs (-00).", file=sys.stderr)
+            print(f"Bonus files found: {sorted(bonus_runs)}", file=sys.stderr)
+        elif bonus_runs:
+            print(f"INFO: Found {len(bonus_runs)} bonus pay runs (-01) and {len(regular_runs)} regular pay runs (-00)", file=sys.stderr)
+        
         # Debug: Show what we have in Pay Run Info vs earnings data
-        # print(f"Debug: Pay Run Info contains periods: {sorted(valid_periods)}", file=sys.stderr)
-        # print(f"Debug: Earnings data contains periods: {sorted(earnings_periods)}", file=sys.stderr)
-        # print(f"Debug: Valid periods from Pay Run Info: {sorted(valid_periods)}", file=sys.stderr)
-        # print(f"Debug: Missing periods (in earnings but not in Pay Run Info): {sorted(earnings_periods - valid_periods)}", file=sys.stderr)
+        print(f"Debug: Pay Run Info contains periods: {sorted(valid_periods, key=lambda x: int(x) if x.isdigit() else float('inf'))}", file=sys.stderr)
+        print(f"Debug: Earnings data contains periods: {sorted(earnings_periods, key=lambda x: int(x) if x.isdigit() else float('inf'))}", file=sys.stderr)
+        print(f"Debug: Valid periods from Pay Run Info: {sorted(valid_periods, key=lambda x: int(x) if x.isdigit() else float('inf'))}", file=sys.stderr)
+        print(f"Debug: Missing periods (in earnings but not in Pay Run Info): {sorted(earnings_periods - valid_periods, key=lambda x: int(x) if x.isdigit() else float('inf'))}", file=sys.stderr)
         
         # Identify which pay runs from earnings data don't have Pay Run Info entries
-        all_runs_in_data = set(df["Pay Run Name"].astype(str).unique())
         valid_mask = df_periods_normalized.isin(valid_periods)
         valid_runs_in_data = set(df[valid_mask]["Pay Run Name"].astype(str).unique())
         skipped_run_names = all_runs_in_data - valid_runs_in_data
         
+        # Debug: Check specific employee 100467 in period 20
+        emp_100467_period_20 = df[
+            (df["Employee Number"] == "100467") & 
+            (df["Pay Run Name"].str.contains("20", na=False))
+        ]
+        if not emp_100467_period_20.empty:
+            print(f"Debug: Found employee 100467 in period 20 data:", file=sys.stderr)
+            for _, row in emp_100467_period_20.iterrows():
+                print(f"  Pay Run: {row['Pay Run Name']}, Period: {df_periods_normalized[row.name]}, Valid: {valid_mask[row.name]}", file=sys.stderr)
+        else:
+            print(f"Debug: Employee 100467 not found in period 20 data", file=sys.stderr)
+        
         # Apply filter to earnings data
+        df_before_filter = len(df)
         df = df[valid_mask]
+        df_after_filter = len(df)
+        print(f"Debug: Filtered earnings data from {df_before_filter} to {df_after_filter} records", file=sys.stderr)
         
         # Map actual earnings columns to expected 401K processing columns
         # Create separate rows for earnings and deductions
