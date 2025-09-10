@@ -150,9 +150,28 @@ def split_employee_column(df: pd.DataFrame) -> pd.DataFrame:
     else:
         employee_col = "Employee"
 
+    # Split on " - " and keep the second part (Employee Number)
     split = df[employee_col].astype(str).str.split(" - ", n=1, expand=True)
+    
+    # Extract name (first part) and employee number (second part)
     df["Name"] = split[0].str.strip()
     df["Employee Number"] = split[1].str.strip() if split.shape[1] > 1 else pd.NA
+    
+    # Sanity check: Employee Number should contain only numeric values
+    if "Employee Number" in df.columns:
+        # Remove NaN values for validation
+        emp_numbers = df["Employee Number"].dropna()
+        if not emp_numbers.empty:
+            # Check if all non-empty values are numeric
+            non_numeric = emp_numbers[~emp_numbers.str.match(r'^\d+$', na=False)]
+            if not non_numeric.empty:
+                sample_bad_values = non_numeric.head(5).tolist()
+                raise ValueError(
+                    f"Employee Number column contains non-numeric values. "
+                    f"Sample bad values: {sample_bad_values}. "
+                    f"Expected format: 'Name - EmployeeNumber' (e.g., 'John Smith - 12345')"
+                )
+    
     return df
 
 
@@ -172,60 +191,62 @@ def _parse_include_numbers(raw: Optional[Iterable]) -> Set[str]:
 
 def add_business_dates_to_pivot(
     pivot_df: pd.DataFrame,
-    base_end_date: Optional[datetime] = None,
-    base_pay_date: Optional[datetime] = None,
-    period_length_days: int = 7,
+    pay_run_info: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Add business dates to pivot columns based on pay period numbers.
-
-    - base_end_date: The end date (e.g., 12/31/2024) for PP1 from config.
-    - period_length_days: Number of days in each period (default 7).
+    """Add business dates to pivot columns using actual period end dates from Pay Run Info.
+    
+    Fails hard if pay run info is missing for any pay run column.
     """
-    # Base date for pay period 1; use config if provided, else fallback to legacy default
-    base_date = base_end_date if base_end_date is not None else datetime(2024, 12, 31)
+    if pay_run_info is None or pay_run_info.empty:
+        raise ValueError("Pay Run Info is required to determine business dates")
     
     # Get pay run columns (exclude Employee Number, Start Date, End Date)
     date_cols = ["Employee Number", "Start Date", "End Date"]
     pay_run_cols = [col for col in pivot_df.columns if col not in date_cols]
     
-    def _infer_period_num_from_name(name: str) -> Optional[int]:
-        # Extract first non-zero integer from the name like "ZXJ - 01-00"
-        nums = re.findall(r"\d+", str(name))
-        for s in nums:
-            try:
-                n = int(s)
-                if n > 0:
-                    return n
-            except Exception:
-                continue
-        # If no positive int found, return None to allow fallback
-        return None
-
-    # Create a mapping of pay run names to business dates
-    date_mapping = {}
-    print(f"Debug: Pay run columns found: {sorted(pay_run_cols)}")
-    for i, col in enumerate(sorted(pay_run_cols)):
-        period_num = _infer_period_num_from_name(col) or (i + 1)
-        # Advance by period_length_days per period
-        business_date = base_date + timedelta(days=(period_num - 1) * max(1, int(period_length_days)))
-        date_mapping[col] = business_date.strftime("%m/%d/%Y")
-        print(f"Debug: Column '{col}' -> Period {period_num} -> Business Date {business_date.strftime('%m/%d/%Y')}")
+    # Create mapping from pay run names to their period end and pay dates
+    pay_info_mapping = {}
+    for _, row in pay_run_info.iterrows():
+        pay_run_id = str(row.get("Pay Run Id", "")).strip()
+        period_end = row.get("Period End")
+        pay_date = row.get("Pay Run Pay Date")
+        
+        if pay_run_id and pd.notna(period_end):
+            pay_info_mapping[pay_run_id] = {
+                'period_end': pd.to_datetime(period_end),
+                'pay_date': pd.to_datetime(pay_date) if pd.notna(pay_date) else None
+            }
     
-    # Create new column names with business dates and pay dates
+    # Create new column names with business dates from Pay Run Info
     renamed_cols = {}
     pay_date_mapping = {}
     
     for col in pivot_df.columns:
-        if col in date_mapping:
-            # Calculate pay date for this period
-            period_num = _infer_period_num_from_name(col) or 1
-            if base_pay_date:
-                pay_date = base_pay_date + timedelta(days=(period_num - 1) * max(1, int(period_length_days)))
+        if col in pay_run_cols:
+            # Find matching pay run info
+            matching_info = None
+            for pay_run_id, info in pay_info_mapping.items():
+                if pay_run_id in col:
+                    matching_info = info
+                    break
+            
+            if matching_info is None:
+                raise ValueError(f"No Pay Run Info found for pay run column '{col}'. Cannot determine business date.")
+            
+            period_end = matching_info['period_end']
+            pay_date = matching_info['pay_date']
+            
+            if pd.isna(period_end):
+                raise ValueError(f"Period End date is missing in Pay Run Info for pay run '{col}'")
+            
+            period_end_str = period_end.strftime("%m/%d/%Y")
+            pay_date_mapping[col] = pay_date
+            
+            if pay_date and pd.notna(pay_date):
                 pay_date_str = pay_date.strftime("%m/%d/%Y")
-                pay_date_mapping[col] = pay_date
-                renamed_cols[col] = f"{col} (End: {date_mapping[col]}, Pay: {pay_date_str})"
+                renamed_cols[col] = f"{col} (End: {period_end_str}, Pay: {pay_date_str})"
             else:
-                renamed_cols[col] = f"{col} ({date_mapping[col]})"
+                renamed_cols[col] = f"{col} (End: {period_end_str})"
         else:
             renamed_cols[col] = col
     
@@ -675,9 +696,7 @@ def summarize(
     include_numbers: Optional[Set[str]] = None,
     exclude_codes: Optional[Set[str]] = None,
     employee_df: Optional[pd.DataFrame] = None,
-    base_end_date: Optional[datetime] = None,
-    base_pay_date: Optional[datetime] = None,
-    period_length_days: int = 7,
+    pay_run_info: Optional[pd.DataFrame] = None,
 ) -> Tuple[pd.DataFrame, dict, pd.DataFrame, pd.DataFrame]:
 
     # Ensure required columns exist
@@ -692,16 +711,8 @@ def summarize(
     df["Record Code"] = df["Record Code"].astype(str).str.strip()
     df["Current Hours"] = pd.to_numeric(df["Current Hours"], errors="coerce").fillna(0.0)
     
-    # Extract employee number from Employee column
-    try:
-        # Handle cases where Employee is in format "Name - Number" or just the number
-        if df["Employee"].str.contains("-").any():
-            df["Employee Number"] = df["Employee"].str.split(" - ").str[-1].str.strip()
-        else:
-            df["Employee Number"] = df["Employee"].str.strip()
-    except Exception as e:
-        print(f"Error extracting employee number: {e}", file=sys.stderr)
-        raise KeyError("Could not extract employee number from 'Employee' column")
+    # Split the Employee column to extract Employee Number
+    df = split_employee_column(df)
     
     # Store original data before exclusions for warning breakdowns
     df_original = df.copy()
@@ -709,29 +720,29 @@ def summarize(
     # Exclude specified earning codes
     exclude_codes = exclude_codes or set()
     if exclude_codes:
-        print(f"Debug: Excluding earning codes: {exclude_codes}")
-        print(f"Debug: Records before exclusion: {len(df)}")
+        # print(f"Debug: Excluding earning codes: {exclude_codes}")
+        # print(f"Debug: Records before exclusion: {len(df)}")
         
         # Check what earning codes exist for employee 318050
         emp_318050_data = df[df["Employee Number"] == "318050"]
         if not emp_318050_data.empty:
             unique_codes = emp_318050_data["Record Code"].unique()
-            print(f"Debug: Employee 318050 earning codes: {sorted(unique_codes)}")
+            # print(f"Debug: Employee 318050 earning codes: {sorted(unique_codes)}")
             
             # Check for PTS codes specifically
             pts_codes = [code for code in unique_codes if "PTS" in code]
-            print(f"Debug: Employee 318050 PTS codes: {pts_codes}")
+            # print(f"Debug: Employee 318050 PTS codes: {pts_codes}")
             
             for pts_code in pts_codes:
                 pts_data = df[(df["Record Code"] == pts_code) & (df["Employee Number"] == "318050")]
-                print(f"Debug: Employee 318050 {pts_code} records: {len(pts_data)}")
+                # print(f"Debug: Employee 318050 {pts_code} records: {len(pts_data)}")
         
         df = df[~df["Record Code"].isin(exclude_codes)].copy()
-        print(f"Debug: Records after exclusion: {len(df)}")
+        # print(f"Debug: Records after exclusion: {len(df)}")
         
         # Verify PTS-PAYTOSTAY is gone for employee 318050
         remaining_pts = df[(df["Record Code"] == "PTS-PAYTOSTAY") & (df["Employee Number"] == "318050")]
-        print(f"Debug: Employee 318050 PTS-PAYTOSTAY records remaining: {len(remaining_pts)}")
+        # print(f"Debug: Employee 318050 PTS-PAYTOSTAY records remaining: {len(remaining_pts)}")
 
     # Filter out any rows where Pay Run Name is empty
     df = df[df["Pay Run Name"] != ""]
@@ -785,6 +796,7 @@ def summarize(
         # Prepare employee data for merge
         employee_filtered["Employee Number"] = employee_filtered["Employee Number"].astype(str).str.strip()
         
+        
         # Select relevant columns for merge (Employee Number, Start Date, End Date, Expected Daily Hours)
         merge_cols = ["Employee Number"]
         if "Start Date" in employee_filtered.columns:
@@ -817,8 +829,14 @@ def summarize(
         else:
             employee_merge = employee_filtered[merge_cols].drop_duplicates(subset=["Employee Number"])
         
+        # Store the correctly parsed Employee Number before merge
+        correct_employee_numbers = pivot_df["Employee Number"].copy()
+        
         # Merge with pivot table
         pivot_df = pivot_df.merge(employee_merge, on="Employee Number", how="left")
+        
+        # Restore the correctly parsed Employee Number column
+        pivot_df["Employee Number"] = correct_employee_numbers
         
         # Reorder columns to put dates after Employee Number
         cols = ["Employee Number"]
@@ -832,10 +850,12 @@ def summarize(
         cols.extend([col for col in pivot_df.columns if col not in cols])
         pivot_df = pivot_df[cols]
     
-    # Add business dates for pay periods
+    # Add business dates for pay periods using Pay Run Info
     pay_date_mapping = {}
     if not pivot_df.empty:
-        pivot_df, pay_date_mapping = add_business_dates_to_pivot(pivot_df, base_end_date=base_end_date, base_pay_date=base_pay_date, period_length_days=period_length_days)
+        if pay_run_info is None or pay_run_info.empty:
+            raise ValueError("Pay Run Info is required to determine business dates")
+        pivot_df, pay_date_mapping = add_business_dates_to_pivot(pivot_df, pay_run_info)
 
     # Filter employees by Start/End dates overlapping the overall period
     if not pivot_df.empty and ("Start Date" in pivot_df.columns or "End Date" in pivot_df.columns):
@@ -888,6 +908,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         default=None,
         help="Optional CSV path to write the summary",
     )
+    parser.add_argument(
+        "--pay-group",
+        type=str,
+        default=None,
+        help="Override pay group from config (e.g., 3EK, ZXJ)",
+    )
     return parser.parse_args(argv)
 
 
@@ -899,8 +925,23 @@ def main(argv: Optional[List[str]] = None) -> int:
     
     # Resolve paths from config or command line arguments
     input_path = args.input if args.input is not None else Path(str(cfg.get("input_path", "")).strip())
+    
+    # Get pay group and year for file naming (allow command line override)
+    pay_group = args.pay_group if args.pay_group is not None else str(cfg.get("pay_group", "3EK")).strip()
+    print(f"Running in {pay_group} mode", file=sys.stderr)
+    pay_period_year = int(cfg.get("pay_period_year", 2025))
+    
+    # Add pay group and year suffix to output name
+    base_output_name = cfg.get("output_name", "output.csv")
+    if base_output_name.endswith('.xlsx'):
+        output_name_with_suffix = base_output_name.replace('.xlsx', f'_{pay_group}_{pay_period_year}.xlsx')
+    elif base_output_name.endswith('.csv'):
+        output_name_with_suffix = base_output_name.replace('.csv', f'_{pay_group}_{pay_period_year}.csv')
+    else:
+        output_name_with_suffix = f"{base_output_name}_{pay_group}_{pay_period_year}"
+    
     output_path = args.output if args.output is not None else (
-        Path(str(cfg.get("output_path", ""))) / cfg.get("output_name", "output.csv")
+        Path(str(cfg.get("output_path", ""))) / output_name_with_suffix
         if "output_path" in cfg and "output_name" in cfg
         else None
     )
@@ -914,10 +955,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not pay_run_info_name:
         print("Error: pay_run_info_name not specified in config", file=sys.stderr)
         return 2
-    pay_period_year = int(cfg.get("pay_period_year", 2025))
-    pay_period_start = int(cfg.get("pay_period_start", 28))
+    pay_period_start = int(cfg.get("pay_period_start", 21))
     pay_period_end = int(cfg.get("pay_period_end", 36))
-    pay_group = str(cfg.get("pay_group", "3EK")).strip()
 
     if not input_path:
         print("Error: input path not provided (via --input or config.yaml input_path)", file=sys.stderr)
@@ -947,14 +986,22 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         
         # Extract pay periods from earnings data Pay Run Names for comparison
-        # Pay Run Names like "3EK - 28-00" should extract "28"
-        df_periods = df["Pay Run Name"].astype(str).str.extract(r"3EK - (\d+)(?:-\d+)?")[0]
-        earnings_periods = set(df_periods.dropna().unique())
+        # Pay Run Names like "3EK - 28-00" or "ZXJ - 28-00" should extract "28"
+        df_periods = df["Pay Run Name"].astype(str).str.extract(rf"{pay_group} - (\d+)(?:-\d+)?")[0]
+        # Normalize periods by removing leading zeros for comparison
+        df_periods_normalized = df_periods.apply(lambda x: str(int(x)) if pd.notna(x) and x.isdigit() else x)
+        earnings_periods = set(df_periods_normalized.dropna().unique())
         valid_periods = set(pay_info["Pay Run Pay Period"].astype(str))
+        
+        # Debug: Show what we have in Pay Run Info vs earnings data
+        # print(f"Debug: Pay Run Info contains periods: {sorted(valid_periods)}", file=sys.stderr)
+        # print(f"Debug: Earnings data contains periods: {sorted(earnings_periods)}", file=sys.stderr)
+        # print(f"Debug: Valid periods from Pay Run Info: {sorted(valid_periods)}", file=sys.stderr)
+        # print(f"Debug: Missing periods (in earnings but not in Pay Run Info): {sorted(earnings_periods - valid_periods)}", file=sys.stderr)
         
         # Identify which pay runs from earnings data don't have Pay Run Info entries
         all_runs_in_data = set(df["Pay Run Name"].astype(str).unique())
-        valid_mask = df_periods.isin(valid_periods)
+        valid_mask = df_periods_normalized.isin(valid_periods)
         valid_runs_in_data = set(df[valid_mask]["Pay Run Name"].astype(str).unique())
         skipped_run_names = all_runs_in_data - valid_runs_in_data
         
@@ -977,8 +1024,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         # Add Pay Run Id column (using Pay Run Name as the identifier, ensure it's string without decimals)
         df["Pay Run Id"] = df["Pay Run Name"].astype(str).str.replace('.0', '', regex=False)
         
-        # Extract Employee Number from Employee column (trim and split on "-")
-        df["Employee Number"] = df["Employee"].astype(str).str.split("-").str[0].str.strip()
+        # Extract Employee Number from Employee column (split on " - " and take the second part)
+        df["Employee Number"] = df["Employee"].astype(str).str.split(" - ").str[1].str.strip()
         
         
         # Report skipped earnings data (not Pay Run Info entries)
@@ -989,24 +1036,38 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
             for run_name in sorted(skipped_run_names):
                 print(f"  - {run_name}", file=sys.stderr)
+            
+            # Show what periods are available in Pay Run Info vs what was requested
+            available_periods = sorted(pay_info["Pay Run Pay Period"].astype(str).unique(), key=lambda x: int(x) if x.isdigit() else float('inf'))
+            requested_range = list(range(pay_period_start, pay_period_end + 1))
+            print(f"\nPay Run Info contains periods: {available_periods}", file=sys.stderr)
+            print(f"Requested range: {requested_range}", file=sys.stderr)
+            missing_from_info = [str(p) for p in requested_range if str(p) not in available_periods]
+            if missing_from_info:
+                print(f"Missing from Pay Run Info: {missing_from_info}", file=sys.stderr)
+                print(f"Note: These periods exist in earnings data but not in Pay Run Info file", file=sys.stderr)
 
         raw_ded_codes = cfg.get("deduction_codes", [])
-        if isinstance(raw_ded_codes, str):
-            deduction_codes = [c.strip() for c in raw_ded_codes.split(",") if c.strip()]
-        else:
-            deduction_codes = [str(c).strip() for c in (raw_ded_codes or [])]
-
+        deduction_codes = [str(c).strip() for c in raw_ded_codes]
+        raw_excluded_codes = cfg.get("excluded_earnings_codes", [])
+        excluded_earnings_codes = [str(c).strip() for c in raw_excluded_codes]
         match_percent = float(cfg.get("match_percent", 25.0))
         match_minimum = float(cfg.get("match_minimum", 10.0))
         match_max_percent = float(cfg.get("match_max_percent", 6.0))
-        match_code = str(cfg.get("match_code", "401-K Match"))
+        # Handle both old single match_code and new multiple match_codes
+        if "match_codes" in cfg:
+            match_codes = [str(c).strip() for c in cfg.get("match_codes", [])]
+        else:
+            # Fallback to old single match_code for backward compatibility
+            match_codes = [str(cfg.get("match_code", "401-K Match"))]
         summary = calculate_401k_matches(
             df,
             deduction_codes,
+            excluded_earnings_codes=excluded_earnings_codes,
             match_percent=match_percent,
             match_minimum=match_minimum,
             match_max_percent=match_max_percent,
-            match_code=match_code,
+            match_codes=match_codes,
         )
 
         # Rename Pay Run Name to Pay Run Id for merge compatibility
@@ -1016,19 +1077,25 @@ def main(argv: Optional[List[str]] = None) -> int:
         summary["Pay Run Id"] = summary["Pay Run Id"].astype(str)
         pay_info["Pay Run Id"] = pay_info["Pay Run Id"].astype(str)
         
-        summary = summary.merge(
-            pay_info[["Pay Run Id", "Period End", "Pay Run Pay Date"]],
-            on="Pay Run Id",
-            how="left",
-        )
+        # Remove the merge of Period End and Pay Run Pay Date columns since they are blank
+        # summary = summary.merge(
+        #     pay_info[["Pay Run Id", "Period End", "Pay Run Pay Date"]],
+        #     on="Pay Run Id",
+        #     how="left",
+        # )
 
         # Flag cases where an existing match will be adjusted
-        warning_mask = (summary["Actual Match"] != 0) & (
-            summary["Match Difference"] > 0
-        )
         summary["Warning"] = ""
-        summary.loc[warning_mask, "Warning"] = summary.loc[warning_mask, "Actual Match"].map(
-            lambda amt: f"Existing match {amt} will be adjusted"
+        
+        # Different warnings for positive vs negative differences
+        positive_diff_mask = (summary["Actual Match"] != 0) & (summary["Match Difference"] > 0)
+        negative_diff_mask = (summary["Actual Match"] != 0) & (summary["Match Difference"] < 0)
+        
+        summary.loc[positive_diff_mask, "Warning"] = summary.loc[positive_diff_mask, "Actual Match"].map(
+            lambda amt: f"Existing match {amt} will be increased"
+        )
+        summary.loc[negative_diff_mask, "Warning"] = summary.loc[negative_diff_mask, "Actual Match"].map(
+            lambda amt: f"Existing match {amt} will be decreased"
         )
 
         # Output summary and optional quick-entry adjustments
@@ -1037,22 +1104,70 @@ def main(argv: Optional[List[str]] = None) -> int:
         else:
             summary_path = output_path
         summary_path.parent.mkdir(parents=True, exist_ok=True)
-        if summary_path.suffix.lower() in {".xlsx", ".xls"}:
-            summary.to_excel(summary_path, index=False)
+        # Split summary into two groups: significant variances and no/trivial variances
+        significant_variances = summary[summary["Match Difference"] != 0].copy()
+        # Exclude employees with 0 401K contributions and 0 matching from 'No Variances' tab
+        no_variances = summary[
+            (summary["Match Difference"] == 0) & 
+            ((summary["401K Deductions"] != 0) | (summary["Actual Match"] != 0))
+        ].copy()
+        
+        # Save summary to Excel with separate tabs
+        if summary_path.suffix.lower() == ".xlsx":
+            with pd.ExcelWriter(summary_path, engine='openpyxl') as writer:
+                significant_variances.to_excel(writer, sheet_name='Variances', index=False)
+                no_variances.to_excel(writer, sheet_name='No Variances', index=False)
         else:
             summary.to_csv(summary_path, index=False)
 
         messages = [f"Summary saved to: {summary_path}"]
         if output_mode == "quick_entries":
-            quick = summary[summary["Match Difference"] > 0].copy()
+            quick = summary[summary["Match Difference"] != 0].copy()
             quick["EmployeeNumber"] = quick["Employee Number"]
-            quick["Code"] = match_code
+            quick["Code"] = match_codes[0] if match_codes else "401-K ER MATCH"
             quick["Hours"] = 0
             quick["Rate"] = 0
             quick["Amount"] = quick["Match Difference"]
-            quick["BusinessDate"] = pd.to_datetime(
-                quick["Period End"], errors="coerce"
-            ).dt.strftime("%Y-%m-%d")
+            # Match each transaction to its specific pay run's period end date
+            if pay_info.empty:
+                raise ValueError("Pay Run Info is required to determine BusinessDate for adjustments")
+            
+            # Create mapping from Pay Run Id to Period End date
+            pay_run_dates = {}
+            for _, row in pay_info.iterrows():
+                pay_run_id = str(row.get("Pay Run Id", "")).strip()
+                period_end = row.get("Period End")
+                if pay_run_id and pd.notna(period_end):
+                    pay_run_dates[pay_run_id] = pd.to_datetime(period_end).strftime("%Y-%m-%d")
+            
+            # Map business dates for each transaction
+            business_dates = []
+            for _, row in quick.iterrows():
+                pay_run_id = str(row.get("Pay Run Id", "")).strip()
+                
+                # First try exact match
+                if pay_run_id in pay_run_dates:
+                    business_dates.append(pay_run_dates[pay_run_id])
+                else:
+                    # Try to match by extracting period number from pay_run_id (e.g., "ZXJ - 11-00" -> "11")
+                    # and finding corresponding Pay Run Info entry
+                    period_match = pd.Series([pay_run_id]).str.extract(r"(\d+)(?:-\d+)?$")[0]
+                    if not period_match.empty and pd.notna(period_match.iloc[0]):
+                        period_num = period_match.iloc[0]
+                        # Find Pay Run Info entry with matching period
+                        matching_info = pay_info[pay_info["Pay Run Pay Period"].astype(str) == period_num]
+                        if not matching_info.empty:
+                            period_end = matching_info.iloc[0]["Period End"]
+                            if pd.notna(period_end):
+                                business_dates.append(pd.to_datetime(period_end).strftime("%Y-%m-%d"))
+                            else:
+                                raise ValueError(f"Period End is missing for period {period_num} in Pay Run Info")
+                        else:
+                            raise ValueError(f"No Pay Run Info found for period {period_num} (from Pay Run Id '{pay_run_id}'). Cannot determine BusinessDate.")
+                    else:
+                        raise ValueError(f"Cannot extract period number from Pay Run Id '{pay_run_id}'. Cannot determine BusinessDate.")
+            
+            quick["BusinessDate"] = business_dates
             quick = quick[
                 ["EmployeeNumber", "Code", "Hours", "Rate", "Amount", "BusinessDate"]
             ]
@@ -1128,14 +1243,19 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         # Generate summary
         print("Generating summary...")
+        # For autopay mode, we need Pay Run Info for business dates
+        try:
+            pay_run_info = read_pay_run_info(input_path)
+        except Exception as e:
+            print(f"Error: Failed to read Pay Run Info: {e}", file=sys.stderr)
+            return 1
+            
         summary, pay_date_mapping, df_original, df_filtered = summarize(
             df,
             include_numbers=include_numbers,
             exclude_codes=exclude_codes,
             employee_df=employee_df,
-            base_end_date=base_end_date,
-            base_pay_date=base_pay_date,
-            period_length_days=period_length_days,
+            pay_run_info=pay_run_info,
         )
         
         # Calculate and display summary statistics
@@ -1253,7 +1373,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     # Check for over-target hours using filtered data (excluding codes already removed)
                     # Only warn if the non-excluded hours exceed the target
                     if hours > target_hours:
-                        print(f"Debug: Employee {emp_no}, Period {bdate_str}: hours={hours}, target={target_hours}")
+                        # print(f"Debug: Employee {emp_no}, Period {bdate_str}: hours={hours}, target={target_hours}")
                         # Get breakdown of earning codes for this employee/period from FILTERED data (non-excluded only)
                         original_col_name = col.split(" (")[0] if " (" in col else col
                         filtered_period_data = df_filtered[(df_filtered["Employee Number"] == emp_no) & (df_filtered["Pay Run Name"] == original_col_name)]

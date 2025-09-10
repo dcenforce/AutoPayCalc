@@ -24,12 +24,18 @@ def read_earnings_deductions(
 
     Files whose first "Pay Run Name" value does not start with ``pay_group``
     are counted and reported once after scanning.
+    
+    After processing, renames files to include pay group and period number
+    for easier identification.
     """
     files = _find_report_files(input_dir, pattern)
     if not files:
         raise FileNotFoundError(f"No files matching '{pattern}' found in {input_dir}")
     frames = []
     skipped = 0
+    duplicates_dir = input_dir / "duplicates"
+    duplicates_found = False
+    
     for file in files:
         try:
             df = pd.read_excel(file, engine="openpyxl")
@@ -43,13 +49,41 @@ def read_earnings_deductions(
                     if pay_group and prefix != pay_group:
                         skipped += 1
                         continue
+                    
+                    # Extract period number from Pay Run Name (e.g., "3EK - 22-00" -> "22")
+                    pay_run_name = first_name[0]
+                    period_match = pd.Series([pay_run_name]).str.extract(r"(\d+)(?:-\d+)?$")[0]
+                    if not period_match.empty and pd.notna(period_match.iloc[0]):
+                        period_num = period_match.iloc[0]
+                        
+                        # Check if filename already contains pay group and period
+                        expected_name = f"Earnings and Deductions by Pay {pay_group} {period_num}.xlsx"
+                        if file.name != expected_name:
+                            new_path = file.parent / expected_name
+                            
+                            # If target file already exists, move to duplicates folder
+                            if new_path.exists():
+                                duplicates_dir.mkdir(exist_ok=True)
+                                duplicate_path = duplicates_dir / file.name
+                                print(f"ERROR: Duplicate file detected: {file.name}", file=sys.stderr)
+                                print(f"Moving to: {duplicate_path}", file=sys.stderr)
+                                file.rename(duplicate_path)
+                                duplicates_found = True
+                            else:
+                                # print(f"Renaming {file.name} to {expected_name}", file=sys.stderr)
+                                file.rename(new_path)
+                        
             frames.append(df)
         except Exception as e:
             raise RuntimeError(f"Failed to read {file}: {e}") from e
-    if skipped:
-        print(
-            f"Running in {pay_group} mode, skipped {skipped} file(s) due to pay group mismatch",
-            file=sys.stderr,
+    if skipped > 0:
+        # This warning is no longer needed.
+        pass
+    if duplicates_found:
+        raise RuntimeError(
+            "Duplicate files were detected and moved to the duplicates folder. "
+            "Please review the duplicates, remove them from the input directory, "
+            "and run the process again to avoid double-loaded entries."
         )
     if not frames:
         raise RuntimeError("No Excel files could be read.")
@@ -62,7 +96,7 @@ def read_pay_run_info(
     pay_group: str = "3EK",
     year: int = 2025,
     start: int = 1,
-    end: int = 52,
+    end: int = 53,
 ) -> pd.DataFrame:
     """Read pay run info file mapping pay run IDs to period end and pay dates.
 
@@ -89,8 +123,12 @@ def read_pay_run_info(
             f"Missing required column(s) in pay run info file: {', '.join(sorted(missing))}"
         )
 
+    # Debug: Show original data before filtering
+    # print(f"Debug: Original Pay Run Info has {len(df)} rows", file=sys.stderr)
+    
     # Filter for desired pay group first
     df = df[df["Pay Group Name"].astype(str).str.startswith(pay_group)]
+    # print(f"Debug: After pay group filter ({pay_group}): {len(df)} rows", file=sys.stderr)
 
     # Normalize period fields first - keep as strings
     df["Pay Run Pay Period"] = (
@@ -99,51 +137,65 @@ def read_pay_run_info(
     df["Pay Run Pay Date"] = pd.to_datetime(df["Pay Run Pay Date"], errors="coerce")
     df["Period End"] = pd.to_datetime(df["Period End"], errors="coerce")
     
-    # Deduplicate within the filtered pay group only (after normalization)
-    # Keep the entry with the most recent pay date for each period
-    original_count = len(df)
-    df = df.sort_values("Pay Run Pay Date", ascending=False)
-    df = df.drop_duplicates(subset=["Pay Group Name", "Pay Run Pay Period"], keep="first")
+    # Show available periods before deduplication  
+    all_periods = sorted(df["Pay Run Pay Period"].dropna().unique(), key=lambda x: int(x) if x.isdigit() else float('inf'))
+    # print(f"Debug: Available periods after normalization: {all_periods}", file=sys.stderr)
     
-    # Report any duplicates that were found and removed
-    if original_count > len(df):
-        duplicates_removed = original_count - len(df)
-        print(f"Warning: {duplicates_removed} duplicate entries removed for pay group '{pay_group}'", file=sys.stderr)
+    # Show pay dates for periods 14-21 to understand year filtering
+    periods_14_21 = df[df["Pay Run Pay Period"].isin(['14', '15', '16', '17', '18', '19', '20', '21'])]
+    if not periods_14_21.empty:
+        # for _, row in periods_14_21.iterrows():
+        #     # print(f"  Period {row['Pay Run Pay Period']}: {row['Pay Run Pay Date']} (year: {row['Pay Run Pay Date'].year if pd.notna(row['Pay Run Pay Date']) else 'NaT'})")
+        pass
+    else:
+        # print(f"Debug: No periods 14-21 found after normalization")
+        pass
     
-    # Filter by pay date year first
-    year_mask = df["Pay Run Pay Date"].dt.year == year
-    year_filtered = df[year_mask]
+    # No deduplication - Pay Run Info should contain unique entries per pay run
+    # Each row represents a distinct pay run with its own Pay Run Id
     
-    # Then restrict to configured pay period ranges
-    period_ints = pd.to_numeric(year_filtered["Pay Run Pay Period"], errors="coerce")
-    in_range = year_filtered[period_ints.between(start, end)]
-
-    return in_range.reset_index(drop=True)
+    # First restrict to configured pay period ranges (before year filtering)
+    period_ints = pd.to_numeric(df["Pay Run Pay Period"], errors="coerce")
+    in_range = df[period_ints.between(start, end, inclusive='both')]
+    
+    # Then filter by pay date year
+    year_mask = in_range["Pay Run Pay Date"].dt.year == year
+    year_filtered = in_range[year_mask]
+    
+    # Show periods available after both filters
+    # year_periods = sorted(year_filtered["Pay Run Pay Period"].dropna().unique())
+    
+    # final_periods = sorted(year_filtered["Pay Run Pay Period"].dropna().unique())
+    
+    return year_filtered.reset_index(drop=True)
 
 
 def calculate_401k_matches(
     df: pd.DataFrame,
     deduction_codes: List[str],
+    excluded_earnings_codes: List[str] = None,
     match_percent: float = 25.0,
     match_minimum: float = 10.0,
     match_max_percent: float = 6.0,
-    match_code: str = "401-K Match",
+    match_codes: List[str] = None,
 ) -> pd.DataFrame:
     """Calculate expected and actual 401K match amounts per employee and pay run.
 
     Args:
         df: Combined earnings/deductions data.
         deduction_codes: Record codes treated as 401K employee deductions.
+        excluded_earnings_codes: Record codes to exclude from total earnings calculation.
         match_percent: Percentage of deductions matched by employer.
         match_minimum: Minimum deduction total before a match applies.
         match_max_percent: Maximum match as a percent of normal earnings.
-        match_code: Earning code used for employer match.
+        match_codes: List of earning codes used for employer match (will be summed).
     """
     results: List[dict] = []
     columns = [
         "Employee Number",
         "Pay Run Id",
         "401K Deductions",
+        "Current Earnings",
         "Expected Match",
         "Actual Match",
         "Match Difference",
@@ -164,39 +216,37 @@ def calculate_401k_matches(
             f"Missing required column(s) for 401K processing: {', '.join(sorted(missing))}"
         )
 
-    ded_codes = {str(c).strip().lower() for c in deduction_codes}
+    excluded_earnings_codes = excluded_earnings_codes or []
+    excluded_codes = [str(c).strip().lower() for c in excluded_earnings_codes]
+    deduction_codes_cf = [str(c).strip().lower() for c in deduction_codes]
+    match_codes = match_codes or ["401-K ER MATCH"]
+    match_codes_cf = [str(c).strip().lower() for c in match_codes]
 
     for (emp_no, pay_run_id), group in df.groupby(["Employee Number", "Pay Run Id"]):
+        types = group["Record Type"].astype(str).str.strip()
         codes = group["Record Code"].astype(str).str.strip()
-        codes_cf = codes.str.casefold()
-        types = group["Record Type"].astype(str)
+        codes_cf = codes.str.lower()
+        amounts = pd.to_numeric(group["Current Amount"], errors="coerce").fillna(0.0)
 
-        ded_mask = types.str.contains("deduction", case=False) & codes_cf.isin(ded_codes)
-        deduction_total = (
-            pd.to_numeric(group.loc[ded_mask, "Current Amount"], errors="coerce")
-            .fillna(0)
-            .sum()
+        deduction_mask = types.str.contains("deduction", case=False) & codes_cf.isin(
+            deduction_codes_cf
         )
+        deductions = amounts[deduction_mask].sum()
 
         earn_mask = types.str.contains("earning", case=False)
-        match_mask = earn_mask & (codes_cf == match_code.lower())
-        normal_mask = earn_mask & ~match_mask
-        normal_earnings = (
-            pd.to_numeric(group.loc[normal_mask, "Current Amount"], errors="coerce")
-            .fillna(0)
-            .sum()
-        )
+        match_mask = earn_mask & codes_cf.isin(match_codes_cf)
+        excluded_mask = codes_cf.isin(excluded_codes)
+        normal_mask = earn_mask & ~match_mask & ~excluded_mask
+        
+        # Calculate current pay run earnings excluding match codes and excluded codes
+        current_normal_earnings = amounts[normal_mask].sum()
 
-        actual_match = (
-            pd.to_numeric(group.loc[match_mask, "Current Amount"], errors="coerce")
-            .fillna(0)
-            .sum()
-        )
+        actual_match = pd.to_numeric(group.loc[match_mask, "Current Amount"], errors="coerce").fillna(0).sum()
 
         expected_match = 0.0
-        if deduction_total >= match_minimum:
+        if deductions >= match_minimum:
             capped_deductions = min(
-                deduction_total, normal_earnings * (match_max_percent / 100.0)
+                deductions, current_normal_earnings * (match_max_percent / 100.0)
             )
             expected_match = capped_deductions * (match_percent / 100.0)
 
@@ -210,7 +260,8 @@ def calculate_401k_matches(
             {
                 "Employee Number": emp_no,
                 "Pay Run Id": pay_run_id,
-                "401K Deductions": round(deduction_total, 2),
+                "401K Deductions": round(deductions, 2),
+                "Current Earnings": round(current_normal_earnings, 2),
                 "Expected Match": round(expected_match, 2),
                 "Actual Match": round(actual_match, 2),
                 "Match Difference": match_difference,

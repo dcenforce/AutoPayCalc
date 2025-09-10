@@ -27,11 +27,12 @@ pay_run_info_name: "Pay Run Info_9-9-2025-24427-PM.xlsx"
 
 # Year and pay period range to process
 pay_period_year: 2025
-pay_period_start: 28
+pay_period_start: 1
 pay_period_end: 36
 
 # Pay group prefix for filtering pay runs
-pay_group: "3EK"
+#pay_group: "3EK"
+pay_group: "ZXJ"
 
 # ============================================================================
 # 401K MATCH PARAMETERS
@@ -44,7 +45,7 @@ match_percent: 25
 match_minimum: 10
 
 # Maximum match as a percent of normal earnings
-match_max_percent: 6
+match_max_percent: 8
 
 # Deduction codes treated as 401K contributions
 deduction_codes:
@@ -53,5 +54,23 @@ deduction_codes:
   - "R-ROTH$"
   - "RTH-ROTH"
 
-# Earning code used for employer match
-match_code: "401-K ER MATCH"
+# Earning codes used for employer match (will be summed together)
+match_codes:
+  - "401-K ER MATCH"
+  - "401K ER MATCH"
+  - "M-401K ER MATCH"
+  - "MEMO : M-401K ER MATCH"
+
+# Earning codes to exclude from total earnings calculation
+excluded_earnings_codes:
+  - "REIM-REIMBURSEMENT"
+  - "Garnishment Reimbursement"
+  - "Moving Expense Reimbursement"
+  - "CM-COMMISSION"
+  - "INC-INCENTRIGHT"
+  - "CON-CONTEST"
+  - "Bonus"
+  - "Construction Bonus"
+  - "Customer Compliment"
+  - "Sting Bonus"
+  - "Weather Bonus"
