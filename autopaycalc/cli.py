@@ -963,6 +963,24 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
 
     if mode == "401k":
+        # Check output file locks before reading any input files
+        output_path = Path(cfg.get("output_path", f"401K Match Summary_{pay_group}_{pay_period_year}.xlsx"))
+        if not output_path.is_absolute():
+            output_path = input_path / output_path
+        
+        potential_output_files = [output_path]
+        if output_mode == "quick_entries":
+            adj_path = output_path.with_name(output_path.stem + "_adjustments.csv")
+            potential_output_files.append(adj_path)
+        
+        locked_files = check_file_locks(potential_output_files)
+        if locked_files:
+            print("ERROR: The following output files are locked (possibly open in Excel):", file=sys.stderr)
+            for locked_file in locked_files:
+                print(f"  - {locked_file}", file=sys.stderr)
+            print("Please close these files and try again.", file=sys.stderr)
+            return 1
+
         input_mask = cfg.get("input_mask", "Earnings and Deductions by Pay*.xlsx")
         try:
             df = read_earnings_deductions(input_path, input_mask, pay_group=pay_group)
@@ -1099,30 +1117,51 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
 
         # Output summary and optional quick-entry adjustments
-        if output_path is None:
-            summary_path = Path("401k_summary.csv")
-        else:
-            summary_path = output_path
+        summary_path = output_path  # Already set earlier with lock check
         summary_path.parent.mkdir(parents=True, exist_ok=True)
-        # Split summary into two groups: significant variances and no/trivial variances
-        significant_variances = summary[summary["Match Difference"] != 0].copy()
+        # Group employees by net adjustment amount across all periods
+        # Calculate net adjustment per employee
+        employee_net_adjustments = summary.groupby("Employee Number")["Match Difference"].sum()
+        
+        # Split summary into groups
+        employees_with_net_adjustments = employee_net_adjustments[employee_net_adjustments != 0].index
+        employees_already_adjusted = employee_net_adjustments[employee_net_adjustments == 0].index
+        
+        # Create tabs based on net adjustments
+        significant_variances = summary[
+            (summary["Employee Number"].isin(employees_with_net_adjustments)) & 
+            (summary["Match Difference"] != 0)
+        ].copy()
+        
+        already_adjusted = summary[
+            summary["Employee Number"].isin(employees_already_adjusted) & 
+            (summary["Match Difference"] != 0)
+        ].copy()
+        
         # Exclude employees with 0 401K contributions and 0 matching from 'No Variances' tab
         no_variances = summary[
             (summary["Match Difference"] == 0) & 
             ((summary["401K Deductions"] != 0) | (summary["Actual Match"] != 0))
         ].copy()
         
+
         # Save summary to Excel with separate tabs
         if summary_path.suffix.lower() == ".xlsx":
             with pd.ExcelWriter(summary_path, engine='openpyxl') as writer:
                 significant_variances.to_excel(writer, sheet_name='Variances', index=False)
+                if not already_adjusted.empty:
+                    already_adjusted.to_excel(writer, sheet_name='Already Adjusted', index=False)
                 no_variances.to_excel(writer, sheet_name='No Variances', index=False)
         else:
             summary.to_csv(summary_path, index=False)
 
         messages = [f"Summary saved to: {summary_path}"]
         if output_mode == "quick_entries":
-            quick = summary[summary["Match Difference"] != 0].copy()
+            # Only include employees with net adjustments != 0 in the adjustments file
+            quick = summary[
+                (summary["Match Difference"] != 0) & 
+                (summary["Employee Number"].isin(employees_with_net_adjustments))
+            ].copy()
             quick["EmployeeNumber"] = quick["Employee Number"]
             quick["Code"] = match_codes[0] if match_codes else "401-K ER MATCH"
             quick["Hours"] = 0
@@ -1153,7 +1192,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                     # and finding corresponding Pay Run Info entry
                     period_match = pd.Series([pay_run_id]).str.extract(r"(\d+)(?:-\d+)?$")[0]
                     if not period_match.empty and pd.notna(period_match.iloc[0]):
-                        period_num = period_match.iloc[0]
+                        period_num_raw = period_match.iloc[0]
+                        # Normalize period number by removing leading zeros
+                        period_num = str(int(period_num_raw)) if period_num_raw.isdigit() else period_num_raw
                         # Find Pay Run Info entry with matching period
                         matching_info = pay_info[pay_info["Pay Run Pay Period"].astype(str) == period_num]
                         if not matching_info.empty:
