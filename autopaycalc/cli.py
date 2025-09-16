@@ -727,29 +727,7 @@ def summarize(
     # Exclude specified earning codes
     exclude_codes = exclude_codes or set()
     if exclude_codes:
-        # print(f"Debug: Excluding earning codes: {exclude_codes}")
-        # print(f"Debug: Records before exclusion: {len(df)}")
-        
-        # Check what earning codes exist for employee 318050
-        emp_318050_data = df[df["Employee Number"] == "318050"]
-        if not emp_318050_data.empty:
-            unique_codes = emp_318050_data["Record Code"].unique()
-            # print(f"Debug: Employee 318050 earning codes: {sorted(unique_codes)}")
-            
-            # Check for PTS codes specifically
-            pts_codes = [code for code in unique_codes if "PTS" in code]
-            # print(f"Debug: Employee 318050 PTS codes: {pts_codes}")
-            
-            for pts_code in pts_codes:
-                pts_data = df[(df["Record Code"] == pts_code) & (df["Employee Number"] == "318050")]
-                # print(f"Debug: Employee 318050 {pts_code} records: {len(pts_data)}")
-        
         df = df[~df["Record Code"].isin(exclude_codes)].copy()
-        # print(f"Debug: Records after exclusion: {len(df)}")
-        
-        # Verify PTS-PAYTOSTAY is gone for employee 318050
-        remaining_pts = df[(df["Record Code"] == "PTS-PAYTOSTAY") & (df["Employee Number"] == "318050")]
-        # print(f"Debug: Employee 318050 PTS-PAYTOSTAY records remaining: {len(remaining_pts)}")
 
     # Filter out any rows where Pay Run Name is empty
     df = df[df["Pay Run Name"] != ""]
@@ -972,7 +950,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     if mode == "401k":
         # Check output file locks before reading any input files
         output_dir = Path(cfg.get("output_path", input_path))
-        output_name = cfg.get("output_name", f"401K Match Summary_{pay_group}_{pay_period_year}.xlsx")
+        base_output_name = cfg.get("output_name", "401K Match Summary.xlsx")
+        
+        # Add pay group and year to filename if not already included
+        if pay_group not in base_output_name and str(pay_period_year) not in base_output_name:
+            name_parts = base_output_name.rsplit('.', 1)
+            if len(name_parts) == 2:
+                output_name = f"{name_parts[0]}_{pay_group}_{pay_period_year}.{name_parts[1]}"
+            else:
+                output_name = f"{base_output_name}_{pay_group}_{pay_period_year}"
+        else:
+            output_name = base_output_name
+            
         output_path = output_dir / output_name
         
         potential_output_files = [output_path]
@@ -1021,9 +1010,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         earnings_periods = set(df_periods_normalized.dropna().unique())
         valid_periods = set(pay_info["Pay Run Pay Period"].astype(str))
         
+        # Get all runs in data first
+        all_runs_in_data = set(df["Pay Run Name"].astype(str).unique())
+        
+        # Identify which pay runs from earnings data don't have Pay Run Info entries
+        valid_mask = df_periods_normalized.isin(valid_periods)
+        valid_runs_in_data = set(df[valid_mask]["Pay Run Name"].astype(str).unique())
+        
         # Check for bonus files (-01) vs regular files (-00)
-        bonus_runs = [run for run in all_runs_in_data if "-01" in run]
-        regular_runs = [run for run in all_runs_in_data if "-00" in run]
+        bonus_runs = [run for run in valid_runs_in_data if "-01" in run]
+        regular_runs = [run for run in valid_runs_in_data if "-00" in run]
         
         if bonus_runs and not regular_runs:
             print("WARNING: Only bonus pay runs (-01) detected. You may have downloaded bonus files instead of regular pay runs (-00).", file=sys.stderr)
@@ -1031,34 +1027,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         elif bonus_runs:
             print(f"INFO: Found {len(bonus_runs)} bonus pay runs (-01) and {len(regular_runs)} regular pay runs (-00)", file=sys.stderr)
         
-        # Debug: Show what we have in Pay Run Info vs earnings data
-        print(f"Debug: Pay Run Info contains periods: {sorted(valid_periods, key=lambda x: int(x) if x.isdigit() else float('inf'))}", file=sys.stderr)
-        print(f"Debug: Earnings data contains periods: {sorted(earnings_periods, key=lambda x: int(x) if x.isdigit() else float('inf'))}", file=sys.stderr)
-        print(f"Debug: Valid periods from Pay Run Info: {sorted(valid_periods, key=lambda x: int(x) if x.isdigit() else float('inf'))}", file=sys.stderr)
-        print(f"Debug: Missing periods (in earnings but not in Pay Run Info): {sorted(earnings_periods - valid_periods, key=lambda x: int(x) if x.isdigit() else float('inf'))}", file=sys.stderr)
         
-        # Identify which pay runs from earnings data don't have Pay Run Info entries
-        valid_mask = df_periods_normalized.isin(valid_periods)
-        valid_runs_in_data = set(df[valid_mask]["Pay Run Name"].astype(str).unique())
         skipped_run_names = all_runs_in_data - valid_runs_in_data
         
-        # Debug: Check specific employee 100467 in period 20
-        emp_100467_period_20 = df[
-            (df["Employee Number"] == "100467") & 
-            (df["Pay Run Name"].str.contains("20", na=False))
-        ]
-        if not emp_100467_period_20.empty:
-            print(f"Debug: Found employee 100467 in period 20 data:", file=sys.stderr)
-            for _, row in emp_100467_period_20.iterrows():
-                print(f"  Pay Run: {row['Pay Run Name']}, Period: {df_periods_normalized[row.name]}, Valid: {valid_mask[row.name]}", file=sys.stderr)
-        else:
-            print(f"Debug: Employee 100467 not found in period 20 data", file=sys.stderr)
-        
         # Apply filter to earnings data
-        df_before_filter = len(df)
         df = df[valid_mask]
-        df_after_filter = len(df)
-        print(f"Debug: Filtered earnings data from {df_before_filter} to {df_after_filter} records", file=sys.stderr)
         
         # Map actual earnings columns to expected 401K processing columns
         # Create separate rows for earnings and deductions
@@ -1196,9 +1169,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                 (summary["Match Difference"] != 0) & 
                 (summary["Employee Number"].isin(employees_with_net_adjustments))
             ].copy()
-            quick["EmployeeNumber"] = quick["Employee Number"]
+            quick["Employee No."] = quick["Employee Number"]
             quick["Code"] = match_codes[0] if match_codes else "401-K ER MATCH"
-            quick["Hours"] = 0
+            quick["Hrs."] = 0
             quick["Rate"] = 0
             quick["Amount"] = quick["Match Difference"]
             # Match each transaction to its specific pay run's period end date
@@ -1242,9 +1215,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                     else:
                         raise ValueError(f"Cannot extract period number from Pay Run Id '{pay_run_id}'. Cannot determine BusinessDate.")
             
-            quick["BusinessDate"] = business_dates
+            quick["Business Date"] = business_dates
             quick = quick[
-                ["EmployeeNumber", "Code", "Hours", "Rate", "Amount", "BusinessDate"]
+                ["Employee No.", "Code", "Hrs.", "Rate", "Amount", "Business Date"]
             ]
             adj_path = summary_path.with_name(summary_path.stem + "_adjustments.csv")
             quick.to_csv(adj_path, index=False)
@@ -1448,7 +1421,6 @@ def main(argv: Optional[List[str]] = None) -> int:
                     # Check for over-target hours using filtered data (excluding codes already removed)
                     # Only warn if the non-excluded hours exceed the target
                     if hours > target_hours:
-                        # print(f"Debug: Employee {emp_no}, Period {bdate_str}: hours={hours}, target={target_hours}")
                         # Get breakdown of earning codes for this employee/period from FILTERED data (non-excluded only)
                         original_col_name = col.split(" (")[0] if " (" in col else col
                         filtered_period_data = df_filtered[(df_filtered["Employee Number"] == emp_no) & (df_filtered["Pay Run Name"] == original_col_name)]
